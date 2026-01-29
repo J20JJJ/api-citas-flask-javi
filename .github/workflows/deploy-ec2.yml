@@ -22,3 +22,4 @@ jobs:
             source venv/bin/activate
             pip install -r requirements.txt
             sudo systemctl restart api-citas
+# el ssh estaba solo por IP de mi pc 
