@@ -1,5 +1,3 @@
-import os
-
 from flask import Flask
 from flask import jsonify
 from flask import request
@@ -44,8 +42,7 @@ swagger = Swagger(app, template={
     "security": [{"Bearer": []}]
 })
 
-mongo_uri = os.environ.get("MONGODB_URI", "mongodb://localhost:27017/")
-myclient = pymongo.MongoClient(mongo_uri)
+myclient = pymongo.MongoClient("mongodb://localhost:27017/")
 
 
 @app.route('/', methods=['GET'])
@@ -147,7 +144,7 @@ def register():
     date = request.json.get('date', None)
 
     try:
-        date = datetime.strptime(date, '%d/%m/%Y').strftime('%d/%m/%Y')
+        date = datetime.strptime(date, '%d/%m/%Y').strftime('%Y/%m/%d')
     except ValueError:
         return jsonify({"msg": "Invalid date format"}), 400
 
@@ -300,7 +297,7 @@ def createDate():
 
     try:
         date = datetime.strptime(date, '%d/%m/%Y %H:00:00')
-        day = date.strftime('%d/%m/%Y')
+        day = date.strftime('%Y/%m/%d')
         hour = date.strftime('%H')
     except ValueError:
         return jsonify({"msg": "Invalid date format"}), 400
@@ -314,7 +311,7 @@ def createDate():
         "username": current_user,
         "day": day,
         "hour": hour,
-        "created_at": datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
+        "created_at": datetime.now().strftime('%Y/%m/%d %H:%M:%S'),
         "center": request.json.get('center', None)
     }
     mycol.insert_one(new_date)
@@ -333,11 +330,18 @@ def getDatesByDay():
     security:
         - Bearer: []
     parameters:
-        - name: day
+        - name: body
           in: body
           type: string
           required: true
-          description: El día para el cual se desean obtener las citas, entre 1 y 31.
+          description: El día para el cual se desean obtener las citas en formato DD/MM/YYYY.
+          schema:
+            type: object
+            properties:
+                day:
+                    type: string
+                    description: Fecha de la cita en formato DD/MM/YYYY
+                    example: "25/12/2025"
     responses:
         200:
             description: Una lista de citas para el día especificado.
@@ -360,8 +364,7 @@ def getDatesByDay():
     mycol = mydb["citas"]
     day = request.json.get('day', None)
 
-    if not day or (day > 31 or day < 1):
-        return jsonify({"msg": "Bad request"}), 400
+    day = datetime.strptime(day, '%d/%m/%Y').strftime("%Y/%m/%d")
 
     dates = mycol.find({"day": day, "cancel": {"$ne": 1}}, {"_id": 0})
     
@@ -471,7 +474,7 @@ def deleteDate():
 
     try:
         date = datetime.strptime(date, '%d/%m/%Y %H:00:00')
-        day = date.strftime('%d/%m/%Y')
+        day = date.strftime('%Y/%m/%d')
         hour = date.strftime('%H')
     except ValueError:
         return jsonify({"msg": "Invalid date format"}), 400
@@ -495,7 +498,7 @@ def deleteDate():
 @jwt_required()
 def getDates():
     """
-    Obtiene las citas no canceladas del usuario actual.
+    Obtiene todas las citas no canceladas.
     ---
     tags:
         - Citas
@@ -521,13 +524,13 @@ def getDates():
                             description: El nombre del doctor.
     """
 
-    current_user = get_jwt_identity()
     mydb = myclient["Clinica"]
     mycol = mydb["citas"]
 
     dates = mycol.find({"cancel": {"$ne": 1}}, {"_id": 0})
    
     return jsonify(format_dates(list(dates)))
+
 
 @app.route("/migracion", methods=['GET'])
 def migracion():
@@ -551,13 +554,102 @@ def migracion():
         return jsonify({"msg": "Database already exists"}), 200
 
 
+@app.route("/currentUser", methods=["PATCH"])
+@jwt_required()
+def patchCurrentuser():
+    """
+    Actualizar datos del usuario logeado
+    ---
+    tags:
+        - Perfil
+    parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+                name:
+                    type: string
+                lastname:
+                    type: string
+                email:
+                    type: string
+                phone:
+                    type: string
+                date:
+                    type: string
+                    format: date
+                    example: "25/12/2025"
+                    description: Fecha de nacimiento en formato DD/MM/YYYY
+    responses:
+        200:
+            description: Usuario creado correctamente
+        400:
+            description: Usuario no existe
+    """
+    current_user = get_jwt_identity()
+    mydb = myclient["Clinica"]
+    mycol = mydb["usuarios"]
+
+    name = request.json.get('name', None)
+    lastname = request.json.get('lastname', None)
+    email = request.json.get('email', None)
+    phone = request.json.get('phone', None)
+    date = request.json.get('date', None)
+
+    newData = {}
+
+    if name:
+        newData["name"] = name
+
+    if lastname:
+        newData["lastname"] = lastname
+
+    if email:
+        newData["email"] = email
+
+    if phone:
+        newData["phone"] = phone
+
+    if date:
+        try:
+            date = datetime.strptime(date, '%d/%m/%Y').strftime('%Y/%m/%d')
+        except ValueError:
+            return jsonify({"msg": "Invalid date format"}), 400
+
+        newData["date"] = date
+
+    print(current_user)
+
+    update_result = mycol.update_one(
+        {"username": current_user},
+        {"$set": newData}  
+    )
+
+    if update_result.matched_count == 0:
+        return jsonify({"msg": "User not found"}), 404
+
+    return jsonify({"msg": "User updated"}), 201
+
+
 def format_dates(dates):
     result = []
     for date in dates:
+        # Reconstruye fecha: day ya es 'DD/MM/YYYY', + hora
         date['date'] = f"{date['day']} {date['hour']}:00:00"
         del date['day']
         del date['hour']
         result.append(date)
 
-    result.sort(key=lambda x: datetime.strptime(x['date'], '%d/%m/%Y %H:00:00'))
+    # Parser flexible para formatos DB ('YYYY/MM/DD') o transformado ('DD/MM/YYYY')
+    def parse_flexible(date_str):
+        for fmt in ['%Y/%m/%d %H:%M:%S', '%d/%m/%Y %H:00:00', '%d/%m/%Y %H:%M:%S']:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        raise ValueError(f"Formato inválido: {date_str}")
+
+    result.sort(key=lambda x: parse_flexible(x['date']))
     return result
